@@ -1,0 +1,167 @@
+---
+title: "ML"
+author: "CHS"
+date: "26 April 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE}
+library(caret)
+library(rpart)
+library(xgboost)
+library(tidyverse)
+library(data.table)
+```
+
+#Introduction and Background
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+Theparticipants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: 
+
+* exactly according to the specification (Class A), 
+* throwing the elbows to the front (Class B), 
+* lifting the dumbbell only halfway (Class C), 
+* lowering the dumbbell only halfway (Class D) and 
+* throwing the hips to the front (Class E).
+
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes. Participants were supervised by an experienced weight lifter to make sure the execution complied to the manner they were supposed to simulate. The exercises were performed by six male participants aged between 20-28 years, with little weight lifting experience.
+
+More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset).
+
+### Research question
+In this project, I will use data from accelerometers on the belt, forearm, arm, and dumbell of the 6 participants Who were asked to perform barbell lifts correctly and incorrectly in 5 different ways; the goal is to use this data to build a model that classify each of the five excercises.
+
+### Set seed, load and prepare data
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearix/pml-testing.csv
+
+```{r }
+set.seed(9845)
+url_training <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+
+url_testing <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+dl_time <- Sys.time()
+dl_time # Dataset was downloaded
+
+df_train_full <- read.csv(url_training, header=TRUE, stringsAsFactors =  TRUE, na.strings=c("NA", "#DIV/0!", ""))
+
+df_test_full <- read.csv(url_testing, header=TRUE, stringsAsFactors = TRUE, na.strings=c("NA", "#DIV/0!", ""))
+```
+
+### Explore dataset
+```{r }
+str(df_train_full)
+```
+
+### Remove irrelvant variables:
+To ensure out of sample validity, we remove ID, time and date variables that are unlikely to have any predictive value outside the training set. 
+```{r }
+df_train_full <- df_train_full[, colSums(is.na(df_train_full))==0]
+df_test_full <- df_test_full[, colSums(is.na(df_test_full))==0]
+
+df_train <- select(df_train_full, -X, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -user_name, -new_window, -num_window) 
+
+df_test <- select(df_test_full, -X, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -user_name, -new_window, -num_window)
+```
+
+### Create cross validation partitions
+We split the training data into a training (70%) and validation (30%) dataset for cross valiadation.
+
+```{r, cache=TRUE }
+inTrain <- createDataPartition(y=df_train$classe,
+                               p=0.7,
+                               list=FALSE)
+df_training <- df_train[inTrain, ]
+df_validation <- df_train[-inTrain, ]
+```
+
+### Preprocess data
+We preprocess the data to standarize, impute medians for NAs and remove highly correlated variables and variables with zero variance. In addition, we scale and center the variables.
+
+```{r }
+df_train_prepro <- preProcess(as.data.frame(df_training[, -(length(df_training) - 1)]), 
+                        method = c("nzv", "corr", "center", "scale"))
+```
+
+The number of variables amended during the preprocessing is indicated below: 
+```{r }
+df_train_prepro
+```
+
+Restructure the dataset using the predict function.
+```{r }
+df_train_prepro_pred <- predict(df_train_prepro, df_training)
+df_validate_prepro_pred <- predict(df_train_prepro, df_validation)
+```
+
+###Fit model
+Using a XGBoosting model to classify the excercise type using 5 cross validations. XGBoost was selected due to its historic performance.
+
+```{r }
+trctrl <- trainControl(method = "cv", number = 5, verboseIter = TRUE)
+```
+
+Defining tuning parameters for XGBoosting using standard assumptions (source:  
+https://www.kaggle.com/pelkoja/visual-xgboost-tuning-with-caret)
+```{r }
+tune_grid <- expand.grid(nrounds = 5,
+                        max_depth = 6,
+                        eta = 0.3,
+                        gamma = 0,
+                        colsample_bytree = 1,
+                        min_child_weight = 1,
+                        subsample = 1)
+```
+
+Fitting the model
+```{r }
+xgb_fit <- train(classe ~., data = df_train_prepro_pred, method = "xgbTree",
+                trControl=trctrl,
+                tuneGrid = tune_grid,
+                tuneLength = 3)
+```
+
+### Results
+
+Looking at the model 
+```{r }
+xgb_fit
+```
+
+#PLot of the 20 most influential variables
+```{r }
+varimp_fit <- varImp(xgb_fit)
+plot(varimp_fit, top=20, main="Variable Importance")
+```
+
+Creating a prediction based on the validation data
+```{r }
+test_predict_validate <- predict(xgb_fit, df_validate_prepro_pred)
+
+confusionMatrix(reference = df_validate_prepro_pred$classe, data = test_predict_validate, mode='everything', positive='MM')
+```
+
+The model seem fairly accurate, so we will attemt to predict using the testing data.
+
+```{r }
+acc <- confusionMatrix(reference = df_validate_prepro_pred$classe, data = test_predict_validate, mode='everything', positive='MM')$overall[1]
+
+err <- 1- acc
+
+acc
+err
+```
+
+The models overall accuracy is `r acc`, By taking its compliment (1-p) we will get the error `r err`. I expect the out of sample error to be different to what was observed in the test validation set. But this is dependent on the representativeness of the training sample and an assumption of out of sample homogeniety. 
+
+### Final prediciton
+The final prediction:
+```{r }
+test_predict_test <- predict(xgb_fit, newdata = df_test)
+table(test_predict_test)
+```
